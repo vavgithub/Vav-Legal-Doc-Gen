@@ -3,8 +3,18 @@ import React, { useState, useRef, useEffect } from 'react';
 import { format, addDays } from 'date-fns';
 import { usePDF } from 'react-to-pdf';
 import { db } from '../config/firebase';
-import { collection, getDocs, query, where } from 'firebase/firestore';
+import {
+  collection,
+  getDocs,
+  query,
+  where,
+  doc,
+  getDoc,
+  setDoc,
+  updateDoc
+} from 'firebase/firestore';
 import { useAuth } from '../context/AuthContext';
+
 
 const InvoiceGenerator = () => {
   const { user } = useAuth();
@@ -12,12 +22,14 @@ const InvoiceGenerator = () => {
   const [services, setServices] = useState([]);
   const [selectedClient, setSelectedClient] = useState('');
   const [items, setItems] = useState([{ serviceId: '', hours: 0, rate: 0, service: '' }]);
-  const [invoiceNumber, setInvoiceNumber] = useState('A-001');
-  const { toPDF, targetRef } = usePDF({filename: 'invoice.pdf'});
+  const [invoiceNumber, setInvoiceNumber] = useState('');
+  const [isGenerating, setIsGenerating] = useState(false);
+  const { toPDF, targetRef } = usePDF({ filename: 'invoice.pdf' });
 
   const currentDate = new Date();
   const invoiceDate = format(currentDate, 'MMMM d, yyyy');
   const dueDate = format(addDays(currentDate, 5), 'MMMM d, yyyy');
+
 
   // Load clients and services on component mount
   useEffect(() => {
@@ -54,6 +66,68 @@ const InvoiceGenerator = () => {
     loadClientsAndServices();
   }, [user]);
 
+  // Load initial data including invoice number
+  useEffect(() => {
+    const loadData = async () => {
+      try {
+        // Load clients and services (existing code)
+        const clientsQuery = query(
+          collection(db, 'clients'),
+          where('userId', '==', user.uid)
+        );
+        const clientsSnapshot = await getDocs(clientsQuery);
+        const clientsData = clientsSnapshot.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data()
+        }));
+        setClients(clientsData);
+
+        const servicesQuery = query(
+          collection(db, 'services'),
+          where('userId', '==', user.uid)
+        );
+        const servicesSnapshot = await getDocs(servicesQuery);
+        const servicesData = servicesSnapshot.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data()
+        }));
+        setServices(servicesData);
+
+        // Get or initialize invoice counter
+        const counterRef = doc(db, 'invoiceCounters', user.uid);
+        const counterDoc = await getDoc(counterRef);
+
+        if (!counterDoc.exists()) {
+          // Initialize counter at 60 for your case
+          await setDoc(counterRef, {
+            currentNumber: 60
+          });
+          setInvoiceNumber('A-060');
+        } else {
+          const currentNumber = counterDoc.data().currentNumber;
+          setInvoiceNumber(`A-${String(currentNumber).padStart(3, '0')}`);
+        }
+      } catch (error) {
+        console.error('Error loading data:', error);
+      }
+    };
+
+    loadData();
+  }, [user]);
+
+  const getNextInvoiceNumber = async () => {
+    const counterRef = doc(db, 'invoiceCounters', user.uid);
+    const counterDoc = await getDoc(counterRef);
+    const currentNumber = counterDoc.data().currentNumber;
+    const nextNumber = currentNumber + 1;
+
+    await updateDoc(counterRef, {
+      currentNumber: nextNumber
+    });
+
+    return `A-${String(nextNumber).padStart(3, '0')}`;
+  };
+
   const handleClientSelect = (clientId) => {
     setSelectedClient(clientId);
   };
@@ -84,19 +158,48 @@ const InvoiceGenerator = () => {
 
   const selectedClientData = clients.find(c => c.id === selectedClient);
 
+  const handleGenerateInvoice = async () => {
+    if (isGenerating) return;
+
+    setIsGenerating(true);
+    try {
+      // Generate PDF
+      await toPDF();
+
+      // Get and set next invoice number
+      const nextInvoiceNumber = await getNextInvoiceNumber();
+      setInvoiceNumber(nextInvoiceNumber);
+
+    } catch (error) {
+      console.error('Error generating invoice:', error);
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
   return (
     <div className="container grid grid-cols-2 gap-4 mx-auto p-4">
       <div className="mb-4 text-left">
         <h1 className="text-2xl font-bold mb-4">Invoice Generator</h1>
-        
+
         {/* Invoice Details */}
-        <div className="mb-4">
+        {/* <div className="mb-4">
           <label className="block mb-2">Invoice Number:</label>
           <input
             type="text"
             value={invoiceNumber}
             onChange={(e) => setInvoiceNumber(e.target.value)}
             className="border p-2 w-full rounded"
+          />
+        </div> */}
+
+        <div className="mb-4">
+          <label className="block mb-2">Invoice Number:</label>
+          <input
+            type="text"
+            value={invoiceNumber}
+            readOnly
+            className="border p-2 w-full rounded bg-gray-50"
           />
         </div>
 
@@ -168,12 +271,18 @@ const InvoiceGenerator = () => {
           </tbody>
         </table>
 
+
         <div className="flex gap-4">
           <button onClick={addItem} className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600">
             Add Item
           </button>
-          <button onClick={() => toPDF()} className="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600">
-            Generate Invoice
+          <button
+            onClick={handleGenerateInvoice}
+            disabled={isGenerating}
+            className={`bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600 ${isGenerating ? 'opacity-50 cursor-not-allowed' : ''
+              }`}
+          >
+            {isGenerating ? 'Generating...' : 'Generate Invoice'}
           </button>
         </div>
       </div>
@@ -195,7 +304,7 @@ const InvoiceGenerator = () => {
             <p>Payment Due: {dueDate}</p>
           </div>
         </div>
-        
+
         <div className="mb-8">
           <h3 className="font-bold mb-2">BILL TO</h3>
           {selectedClientData && (
